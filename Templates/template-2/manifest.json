@@ -1,0 +1,25 @@
+{
+  "id": "dopefolio",
+  "name": "Dopefolio",
+  "description": "모던하고 세련된 포트폴리오 템플릿",
+  "version": "1.0.0",
+  "author": "Dopefolio",
+  "files": [
+    "index.html",
+    "project-1.html",
+    "project-2.html",
+    "project-3.html",
+    "index.js",
+    "css/style.css",
+    "assets/png/john-doe.png",
+    "assets/png/github-ico.png",
+    "assets/png/linkedin-ico.png",
+    "assets/png/twitter-ico.png",
+    "assets/png/yt-ico.png",
+    "assets/png/insta-ico.png",
+    "assets/jpeg/project-mockup-example.jpeg",
+    "assets/svg/common-bg.svg",
+    "assets/svg/ham-menu.svg",
+    "assets/svg/ham-menu-close.svg"
+  ]
+}

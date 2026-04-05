@@ -448,6 +448,67 @@
         .replace(/\/+$/, '');
     }
 
+    // Filter out hidden metadata files that may not be publicly served in static hosting.
+    function isOptionalTemplateFile(path) {
+      const normalized = normalizeRelativePath(path);
+      const basename = normalized.split('/').filter(Boolean).pop() || '';
+      return basename.startsWith('.') || basename.toLowerCase() === 'thumbs.db';
+    }
+
+    // Parse template HTML and collect relative asset references (css/js/images/docs) for packaging.
+    function extractRelativeAssetPathsFromHtml(htmlContent) {
+      if (!htmlContent) {
+        return [];
+      }
+
+      const assets = new Set();
+
+      const addAsset = (rawPath) => {
+        const value = String(rawPath || '').trim();
+        if (!value || value.startsWith('#')) {
+          return;
+        }
+
+        if (/^(?:[a-z]+:|\/\/)/i.test(value)) {
+          return;
+        }
+
+        const noQuery = value.split('?')[0].split('#')[0];
+        const normalized = normalizeRelativePath(noQuery);
+
+        if (!normalized || normalized.startsWith('../')) {
+          return;
+        }
+
+        assets.add(normalized);
+      };
+
+      try {
+        const parser = new DOMParser();
+        const documentNode = parser.parseFromString(htmlContent, 'text/html');
+
+        documentNode.querySelectorAll('[src]').forEach((element) => addAsset(element.getAttribute('src')));
+        documentNode.querySelectorAll('[href]').forEach((element) => addAsset(element.getAttribute('href')));
+        documentNode.querySelectorAll('[poster]').forEach((element) => addAsset(element.getAttribute('poster')));
+
+        documentNode.querySelectorAll('[srcset]').forEach((element) => {
+          const srcset = String(element.getAttribute('srcset') || '').trim();
+          if (!srcset) {
+            return;
+          }
+
+          srcset.split(',').forEach((entry) => {
+            const candidate = entry.trim().split(/\s+/)[0];
+            addAsset(candidate);
+          });
+        });
+      } catch (error) {
+        return [];
+      }
+
+      return Array.from(assets);
+    }
+
     // Build the expected preview image basename from template path and root folder.
     function inferPreviewBasename(relativePath) {
       const normalized = normalizeRelativePath(relativePath);
@@ -1027,40 +1088,45 @@
       const templateRoot = selectedTemplateEntry.htmlPath.substring(0, selectedTemplateEntry.htmlPath.lastIndexOf('/'));
       const templateFolderName = templateRoot.split('/').filter(Boolean).pop() || 'template';
 
-      // Use the precomputed full file list when available.
-      let filesList = Array.isArray(selectedTemplateEntry.files)
-        ? selectedTemplateEntry.files.map((filePath) => normalizeRelativePath(filePath)).filter(Boolean)
-        : [];
+      // Merge file lists from all available sources for the highest packaging completeness.
+      const filesSet = new Set(
+        (Array.isArray(selectedTemplateEntry.files) ? selectedTemplateEntry.files : [])
+          .map((filePath) => normalizeRelativePath(filePath))
+          .filter(Boolean)
+      );
 
       // Try files.json before manifest for legacy templates.
-      if (!filesList.length) {
-        try {
-          const filesResponse = await fetch(`${templateRoot}/files.json`);
-          if (filesResponse.ok) {
-            const filesData = await filesResponse.json();
-            filesList = Array.isArray(filesData?.files)
-              ? filesData.files.map((filePath) => normalizeRelativePath(filePath)).filter(Boolean)
-              : [];
-          }
-        } catch (error) {
-          // Ignore files.json errors and continue with other fallbacks.
+      try {
+        const filesResponse = await fetch(`${templateRoot}/files.json`);
+        if (filesResponse.ok) {
+          const filesData = await filesResponse.json();
+          const jsonFiles = Array.isArray(filesData?.files)
+            ? filesData.files.map((filePath) => normalizeRelativePath(filePath)).filter(Boolean)
+            : [];
+          jsonFiles.forEach((filePath) => filesSet.add(filePath));
         }
+      } catch (error) {
+        // Ignore files.json errors and continue with other fallbacks.
       }
 
       // Load files list from manifest.json
       try {
-        if (!filesList.length) {
-          const manifestResponse = await fetch(`${templateRoot}/manifest.json`);
-          if (manifestResponse.ok) {
-            const manifestData = await manifestResponse.json();
-            filesList = Array.isArray(manifestData?.files)
-              ? manifestData.files.map((filePath) => normalizeRelativePath(filePath)).filter(Boolean)
-              : [];
-          }
+        const manifestResponse = await fetch(`${templateRoot}/manifest.json`);
+        if (manifestResponse.ok) {
+          const manifestData = await manifestResponse.json();
+          const manifestFiles = Array.isArray(manifestData?.files)
+            ? manifestData.files.map((filePath) => normalizeRelativePath(filePath)).filter(Boolean)
+            : [];
+          manifestFiles.forEach((filePath) => filesSet.add(filePath));
         }
       } catch (error) {
         // Ignore manifest errors and continue with fallback discovery.
       }
+
+      extractRelativeAssetPathsFromHtml(selectedTemplateEntry.htmlContent)
+        .forEach((filePath) => filesSet.add(filePath));
+
+      let filesList = Array.from(filesSet);
 
       // Fallback: recursively collect files from template directory listing.
       if (!filesList.length) {
@@ -1086,6 +1152,8 @@
         throw new Error('Failed to create selected template folder in ZIP.');
       }
 
+      const missingFiles = [];
+
       for (const filePath of filesList) {
         try {
           const fullPath = `${templateRoot}/${filePath}`;
@@ -1094,10 +1162,22 @@
           if (response.ok) {
             const blob = await response.blob();
             templateFolder.file(filePath, blob);
+          } else if (!isOptionalTemplateFile(filePath)) {
+            missingFiles.push(filePath);
           }
         } catch (error) {
+          if (!isOptionalTemplateFile(filePath)) {
+            missingFiles.push(filePath);
+          }
           console.warn(`Could not load ${filePath}:`, error);
         }
+      }
+
+      if (missingFiles.length > 0) {
+        const preview = missingFiles.slice(0, 8).join(', ');
+        const extraCount = Math.max(missingFiles.length - 8, 0);
+        const suffix = extraCount > 0 ? ` (and ${extraCount} more)` : '';
+        throw new Error(`Template packaging failed. Missing ${missingFiles.length} file(s): ${preview}${suffix}`);
       }
 
       const blob = await zip.generateAsync({ type: 'blob' });
@@ -1137,7 +1217,7 @@
       try {
         await buildAndDownloadZip(portfolioSpec, promptFile, selectedTemplate);
       } catch (error) {
-        ctaErrorElement.textContent = 'ZIP generation failed. Please try again.';
+        ctaErrorElement.textContent = error?.message || 'ZIP generation failed. Please try again.';
         console.error('ZIP generation error:', error);
       }
     }

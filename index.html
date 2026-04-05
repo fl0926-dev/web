@@ -523,7 +523,7 @@
 
         try {
           if (await urlExists(path)) {
-            discovered.push({ root, relativePath: filename });
+            discovered.push({ root, relativePath: filename, files: [], displayName: '' });
             missedInARow = 0;
           } else {
             missedInARow += 1;
@@ -562,7 +562,7 @@
         }
 
         if (matchedEntry) {
-          discovered.push({ root, relativePath: matchedEntry });
+          discovered.push({ root, relativePath: matchedEntry, files: [], displayName: '' });
           missedInARow = 0;
         } else {
           missedInARow += 1;
@@ -596,7 +596,7 @@
           }
 
           if (/\.html$/i.test(cleaned)) {
-            discovered.push({ root, relativePath: cleaned });
+            discovered.push({ root, relativePath: cleaned, files: [], displayName: '' });
             continue;
           }
 
@@ -606,7 +606,7 @@
               for (const candidate of TEMPLATE_ENTRY_CANDIDATES) {
                 const candidatePath = `${root}/${folderName}/${candidate}`;
                 if (await urlExists(candidatePath)) {
-                  discovered.push({ root, relativePath: `${folderName}/${candidate}` });
+                  discovered.push({ root, relativePath: `${folderName}/${candidate}`, files: [], displayName: '' });
                   break;
                 }
               }
@@ -678,12 +678,23 @@
 
             if (manifestEntries.length > 0) {
               manifestEntries.forEach((item) => {
-                const normalized = normalizeRelativePath(item);
+                const rawPath = typeof item === 'string'
+                  ? item
+                  : (item?.path || item?.file || item?.entry || item?.relativePath || (item?.id ? `${item.id}/index.html` : ''));
+                const normalized = normalizeRelativePath(rawPath);
                 if (!normalized) {
                   return;
                 }
                 const relativePath = /\.html$/i.test(normalized) ? normalized : `${normalized}/index.html`;
-                discovered.push({ root, relativePath });
+                const files = Array.isArray(item?.files)
+                  ? item.files.map((filePath) => normalizeRelativePath(filePath)).filter(Boolean)
+                  : [];
+                discovered.push({
+                  root,
+                  relativePath,
+                  files,
+                  displayName: item?.name || ''
+                });
               });
               // Only return from manifest, don't continue to other discovery methods
               const unique = [];
@@ -776,7 +787,8 @@
             file: fileEntry.relativePath,
             htmlPath,
             previewPath,
-            displayName: prettyName,
+            displayName: fileEntry.displayName || prettyName,
+            files: Array.isArray(fileEntry.files) ? fileEntry.files : [],
             htmlContent,
             fetchError: ''
           };
@@ -785,7 +797,8 @@
             file: fileEntry.relativePath,
             htmlPath,
             previewPath,
-            displayName: prettyName,
+            displayName: fileEntry.displayName || prettyName,
+            files: Array.isArray(fileEntry.files) ? fileEntry.files : [],
             htmlContent: '',
             fetchError: 'Failed to load this template file.'
           };
@@ -990,7 +1003,7 @@
         }
 
     // Build and download portfolio_package.zip with template folder
-    async function buildAndDownloadZip(portfolioSpec, promptFile, selectedTemplatePath) {
+    async function buildAndDownloadZip(portfolioSpec, promptFile, selectedTemplateEntry) {
       if (!window.JSZip) {
         throw new Error('JSZip failed to load. Please refresh and try again.');
       }
@@ -1006,17 +1019,44 @@
       folder.file('portfolio_spec.txt', portfolioSpec);
       folder.file('prompt.txt', promptFile);
 
+      if (!selectedTemplateEntry || !selectedTemplateEntry.htmlPath) {
+        throw new Error('No template selected for ZIP packaging.');
+      }
+
       // Extract template folder path (e.g., "./Templates/template-1")
-      const templateRoot = selectedTemplatePath.substring(0, selectedTemplatePath.lastIndexOf('/'));
+      const templateRoot = selectedTemplateEntry.htmlPath.substring(0, selectedTemplateEntry.htmlPath.lastIndexOf('/'));
       const templateFolderName = templateRoot.split('/').filter(Boolean).pop() || 'template';
 
+      // Use the precomputed full file list when available.
+      let filesList = Array.isArray(selectedTemplateEntry.files)
+        ? selectedTemplateEntry.files.map((filePath) => normalizeRelativePath(filePath)).filter(Boolean)
+        : [];
+
+      // Try files.json before manifest for legacy templates.
+      if (!filesList.length) {
+        try {
+          const filesResponse = await fetch(`${templateRoot}/files.json`);
+          if (filesResponse.ok) {
+            const filesData = await filesResponse.json();
+            filesList = Array.isArray(filesData?.files)
+              ? filesData.files.map((filePath) => normalizeRelativePath(filePath)).filter(Boolean)
+              : [];
+          }
+        } catch (error) {
+          // Ignore files.json errors and continue with other fallbacks.
+        }
+      }
+
       // Load files list from manifest.json
-      let filesList = [];
       try {
-        const manifestResponse = await fetch(`${templateRoot}/manifest.json`);
-        if (manifestResponse.ok) {
-          const manifestData = await manifestResponse.json();
-          filesList = manifestData.files || [];
+        if (!filesList.length) {
+          const manifestResponse = await fetch(`${templateRoot}/manifest.json`);
+          if (manifestResponse.ok) {
+            const manifestData = await manifestResponse.json();
+            filesList = Array.isArray(manifestData?.files)
+              ? manifestData.files.map((filePath) => normalizeRelativePath(filePath)).filter(Boolean)
+              : [];
+          }
         }
       } catch (error) {
         // Ignore manifest errors and continue with fallback discovery.
@@ -1028,10 +1068,12 @@
       }
 
       // Ensure the selected template entry file is included.
-      const selectedEntryName = selectedTemplatePath.split('/').filter(Boolean).pop();
+      const selectedEntryName = selectedTemplateEntry.htmlPath.split('/').filter(Boolean).pop();
       if (selectedEntryName && !filesList.includes(selectedEntryName)) {
         filesList.unshift(selectedEntryName);
       }
+
+      filesList = [...new Set(filesList.map((filePath) => normalizeRelativePath(filePath)).filter(Boolean))];
 
       if (!filesList.length) {
         ctaErrorElement.textContent = 'Could not load template files. Please run with a local server and try again.';
@@ -1093,7 +1135,7 @@
       const promptFile = buildPromptFile(answers);
 
       try {
-        await buildAndDownloadZip(portfolioSpec, promptFile, selectedTemplatePath);
+        await buildAndDownloadZip(portfolioSpec, promptFile, selectedTemplate);
       } catch (error) {
         ctaErrorElement.textContent = 'ZIP generation failed. Please try again.';
         console.error('ZIP generation error:', error);

@@ -421,7 +421,7 @@
 
     let templateEntries = [];
     let selectedTemplatePath = '';
-    const TEMPLATE_ROOT_CANDIDATES = ['./Templates', './templates'];
+    const TEMPLATE_ROOT_CANDIDATES = ['./templates', './Templates'];
     const TEMPLATE_ENTRY_CANDIDATES = ['index.html', 'sphere.html', 'styles.html'];
 
     // Render all question fields from the QUESTIONS array.
@@ -459,10 +459,19 @@
         .pop() || 'template';
     }
 
-    // Check whether a URL exists using GET (more reliable than HEAD on static hosts).
+    // Check whether a URL exists, trying HEAD first and then GET as fallback.
     async function urlExists(url) {
       try {
-        const getResponse = await fetch(url, { cache: 'no-store' });
+        const headResponse = await fetch(url, { method: 'HEAD' });
+        if (headResponse.ok) {
+          return true;
+        }
+      } catch (error) {
+        // Ignore and try GET fallback.
+      }
+
+      try {
+        const getResponse = await fetch(url);
         return getResponse.ok;
       } catch (error) {
         return false;
@@ -522,7 +531,8 @@
         const path = `${root}/${filename}`;
 
         try {
-          if (await urlExists(path)) {
+          const response = await fetch(path, { method: 'HEAD' });
+          if (response.ok) {
             discovered.push({ root, relativePath: filename });
             missedInARow = 0;
           } else {
@@ -552,7 +562,8 @@
         for (const candidate of TEMPLATE_ENTRY_CANDIDATES) {
           const path = `${root}/${folderName}/${candidate}`;
           try {
-            if (await urlExists(path)) {
+            const response = await fetch(path, { method: 'HEAD' });
+            if (response.ok) {
               matchedEntry = `${folderName}/${candidate}`;
               break;
             }
@@ -670,14 +681,8 @@
           const manifestResponse = await fetch(`${root}/index.json`);
           if (manifestResponse.ok) {
             const manifest = await manifestResponse.json();
-            const manifestEntries = Array.isArray(manifest)
-              ? manifest
-              : Array.isArray(manifest?.templates)
-                ? manifest.templates
-                : [];
-
-            if (manifestEntries.length > 0) {
-              manifestEntries.forEach((item) => {
+            if (Array.isArray(manifest) && manifest.length > 0) {
+              manifest.forEach((item) => {
                 const normalized = normalizeRelativePath(item);
                 if (!normalized) {
                   return;
